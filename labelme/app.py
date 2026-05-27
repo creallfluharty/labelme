@@ -59,6 +59,7 @@ from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
 from labelme.widgets import download_ai_model
 from labelme.widgets import format_shape_label
+from labelme.widgets.label_list_widget import format_label_with_color_dot
 
 from . import utils
 
@@ -171,6 +172,7 @@ class _Menus(NamedTuple):
     view: QtWidgets.QMenu
     help: QtWidgets.QMenu
     label_list: QtWidgets.QMenu
+    unique_label_list: QtWidgets.QMenu
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -850,6 +852,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_label_list_menu
         )
 
+        change_label_color = action(
+            text=self.tr("Change color…"),
+            slot=self._change_label_color,
+            icon=None,
+            tip=self.tr("Change the display color for this label"),
+        )
+        unique_label_menu = QtWidgets.QMenu()
+        utils.add_actions(unique_label_menu, (change_label_color,))
+        self._docks.unique_label_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._docks.unique_label_list.customContextMenuRequested.connect(
+            self._show_unique_label_list_menu
+        )
+
         utils.add_actions(
             file_menu,
             (
@@ -917,6 +932,7 @@ class MainWindow(QtWidgets.QMainWindow):
             view=view_menu,
             help=help_menu,
             label_list=label_menu,
+            unique_label_list=unique_label_menu,
         )
 
     def _setup_toolbars(self) -> None:
@@ -1447,6 +1463,46 @@ class MainWindow(QtWidgets.QMainWindow):
         # PyQt5 stubs type QMenu.exec() argument too narrowly
         self._menus.label_list.exec(self._docks.label_list.mapToGlobal(point))  # ty: ignore[invalid-argument-type]
 
+    def _show_unique_label_list_menu(self, point: QtCore.QPoint) -> None:
+        self._menus.unique_label_list.exec(self._docks.unique_label_list.mapToGlobal(point))  # ty: ignore[invalid-argument-type]
+
+    def _change_label_color(self) -> None:
+        items = self._docks.unique_label_list.selectedItems()
+        if not items:
+            return
+        label: str = items[0].data(Qt.UserRole)
+        current_rgb = self._get_rgb_by_label(
+            label=label, unique_label_list=self._docks.unique_label_list
+        )
+        initial_color = QtGui.QColor(*current_rgb)
+        chosen = QtWidgets.QColorDialog.getColor(initial_color, self, self.tr("Select color for label: %s") % label)
+        if not chosen.isValid():
+            return
+
+        r, g, b = chosen.red(), chosen.green(), chosen.blue()
+
+        # Store in other_data so the color is saved with the JSON file
+        if self._other_data is None:
+            self._other_data = {}
+        if "label_colors" not in self._other_data:
+            self._other_data["label_colors"] = {}
+        self._other_data["label_colors"][label] = [r, g, b]
+
+        # Update the color dot in the Label List
+        item = self._docks.unique_label_list.find_label_item(label)
+        if item:
+            item.setText(format_label_with_color_dot(text=label, color=(r, g, b)))
+
+        # Recolor every shape with this label and refresh their Annotation List rows
+        for list_item in self._docks.label_list:
+            shape = list_item.shape()
+            if shape is not None and shape.label == label:
+                self._update_shape_color(shape)
+                list_item.setText(format_shape_label(shape))
+
+        self._canvas_widgets.canvas.update()
+        self.mark_dirty()
+
     def validate_label(self, label: str) -> bool:
         policy = self._config["validate_label"]
         if policy is None:
@@ -1622,6 +1678,13 @@ class MainWindow(QtWidgets.QMainWindow):
         label: str,
         unique_label_list: UniqueLabelQListWidget,
     ) -> tuple[int, int, int]:
+        # File-level colors (stored in the .json via other_data) take top priority
+        if self._other_data:
+            rgb = _rgb_from_label_colors(
+                label=label, label_colors=self._other_data.get("label_colors")
+            )
+            if rgb is not None:
+                return rgb
         if self._config["shape_color"] == "auto":
             item = unique_label_list.find_label_item(label)
             item_index: int = (
